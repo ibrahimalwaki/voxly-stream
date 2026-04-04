@@ -137,7 +137,12 @@ wss.on('connection', (twilioWs) => {
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
 
-      // Trigger immediately on final transcript — don't wait for UtteranceEnd
+      // Only trigger early if the sentence sounds complete (ends with punctuation
+      // or is a short clear answer like "yes", "no", a number, or a name)
+      const looksComplete = /[.!?]$/.test(speechBuffer) ||
+        /^(yes|no|yeah|nope|sure|okay|ok|correct|right|that'?s? right|sounds good)$/i.test(speechBuffer.trim()) ||
+        speechBuffer.trim().split(' ').length <= 4
+
       clearTimeout(silenceTimer)
       silenceTimer = setTimeout(() => {
         if (speechBuffer && !isProcessing) {
@@ -145,11 +150,11 @@ wss.on('connection', (twilioWs) => {
           speechBuffer = ''
           handleUserSpeech(text)
         }
-      }, 400) // 400ms gives a natural pause without long delay
+      }, looksComplete ? 400 : 900) // short answers: 400ms, longer speech: 900ms
     })
 
     connection.on('UtteranceEnd', () => {
-      // Fallback: catches cases where Results didn't fire the timer
+      // Always fires after 1s silence — catches anything the timer missed
       if (speechBuffer && !isProcessing) {
         clearTimeout(silenceTimer)
         const text = speechBuffer
