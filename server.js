@@ -119,8 +119,8 @@ wss.on('connection', (twilioWs) => {
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
-      interim_results: false,   // only fire on final transcripts — prevents partial triggers
-      utterance_end_ms: 1200,   // wait 1.2s of silence before declaring utterance done
+      interim_results: true,
+      utterance_end_ms: 1000,
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -136,10 +136,20 @@ wss.on('connection', (twilioWs) => {
 
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
+
+      // Trigger immediately on final transcript — don't wait for UtteranceEnd
+      clearTimeout(silenceTimer)
+      silenceTimer = setTimeout(() => {
+        if (speechBuffer && !isProcessing) {
+          const text = speechBuffer
+          speechBuffer = ''
+          handleUserSpeech(text)
+        }
+      }, 400) // 400ms gives a natural pause without long delay
     })
 
     connection.on('UtteranceEnd', () => {
-      // Only trigger after Deepgram confirms the utterance is fully done
+      // Fallback: catches cases where Results didn't fire the timer
       if (speechBuffer && !isProcessing) {
         clearTimeout(silenceTimer)
         const text = speechBuffer
