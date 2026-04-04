@@ -32,6 +32,8 @@ function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GRO
 function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })) }
 
 const PORT = process.env.PORT || 8080
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+const MAX_CONTEXT_MESSAGES = 8
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are Aria, the AI receptionist for Bright Smile Dental. You handle patient phone calls exactly like a warm, experienced human receptionist would.
@@ -193,15 +195,17 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
+      const recentConversation = conversationHistory.slice(-MAX_CONTEXT_MESSAGES)
+
       // 1. Get AI response from Groq
       const completion = await Promise.race([
         getGroq().chat.completions.create({
-          model: 'llama-3.3-70b-versatile',
-          max_tokens: 120,
-          temperature: 0.6,
+          model: GROQ_MODEL,
+          max_tokens: 80,
+          temperature: 0.4,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
-            ...conversationHistory,
+            ...recentConversation,
           ],
         }),
         new Promise((resolve) => {
@@ -264,6 +268,46 @@ wss.on('connection', (twilioWs) => {
 
     } catch (err) {
       console.error('Pipeline error:', err)
+
+      let fallbackText = "I'm sorry, our system is a little busy right now. Could you repeat that in a moment?"
+      if (err?.status === 429) {
+        fallbackText = "I'm sorry, we're experiencing a temporary delay right now. Please hold for a moment and try again, or call back in a few minutes."
+      }
+
+      try {
+        const ttsResponse = await getOAI().audio.speech.create({
+          model: 'tts-1',
+          voice: 'nova',
+          input: fallbackText,
+          response_format: 'pcm',
+          speed: 1.0,
+        })
+
+        const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+        const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
+
+        if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
+          const chunkSize = 160
+          for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+            const chunk = audioBuffer.subarray(i, i + chunkSize)
+            twilioWs.send(JSON.stringify({
+              event: 'media',
+              streamSid,
+              media: {
+                payload: chunk.toString('base64'),
+              },
+            }))
+          }
+
+          twilioWs.send(JSON.stringify({
+            event: 'mark',
+            streamSid,
+            mark: { name: 'fallback_response' },
+          }))
+        }
+      } catch (ttsErr) {
+        console.error('Fallback TTS error:', ttsErr)
+      }
     } finally {
       isProcessing = false
     }
