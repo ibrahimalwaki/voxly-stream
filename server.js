@@ -4,13 +4,16 @@ const { createClient } = require('@deepgram/sdk')
 const Groq = require('groq-sdk')
 const OpenAI = require('openai')
 
-// Convert 16-bit PCM to 8-bit mulaw (G.711)
-function pcm16ToMulaw(pcmBuffer) {
-  const MULAW_MAX = 0x1FFF
+// Downsample 16-bit PCM from 24kHz to 8kHz (3:1) then convert to mulaw
+function pcm24kTo8kMulaw(pcmBuffer) {
   const MULAW_BIAS = 33
-  const out = Buffer.alloc(pcmBuffer.length / 2)
-  for (let i = 0; i < out.length; i++) {
-    let sample = pcmBuffer.readInt16LE(i * 2)
+  const MULAW_MAX = 0x1FFF
+  const samples = pcmBuffer.length / 2
+  const outSamples = Math.floor(samples / 3)
+  const out = Buffer.alloc(outSamples)
+  for (let i = 0; i < outSamples; i++) {
+    // Simple decimation: take every 3rd sample
+    let sample = pcmBuffer.readInt16LE(i * 6)
     const sign = (sample >> 8) & 0x80
     if (sign) sample = -sample
     if (sample > MULAW_MAX) sample = MULAW_MAX
@@ -197,7 +200,7 @@ wss.on('connection', (twilioWs) => {
       })
 
       const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
-      const audioBuffer = pcm16ToMulaw(pcmBuffer)
+      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
 
       // 3. Send audio back to Twilio in chunks
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
@@ -255,7 +258,7 @@ wss.on('connection', (twilioWs) => {
       })
 
       const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
-      const audioBuffer = pcm16ToMulaw(pcmBuffer)
+      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
 
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         const chunkSize = 160
