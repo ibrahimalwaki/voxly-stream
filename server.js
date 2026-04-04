@@ -267,12 +267,11 @@ wss.on('connection', (twilioWs) => {
         }))
       }
 
-      // Release lock after estimated audio duration so caller can speak again
-      const audioDurationMs = (audioBuffer.length / 8000) * 1000
-      setTimeout(() => { isProcessing = false }, audioDurationMs + 300)
+      // Release immediately — Twilio buffers audio, caller can't speak until it finishes anyway
+      isProcessing = false
 
-      // Handle transfer
       if (transferRequested) {
+        const audioDurationMs = (audioBuffer.length / 8000) * 1000
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
             twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
