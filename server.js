@@ -147,6 +147,8 @@ wss.on('connection', (twilioWs) => {
   let callSid = null
   let conversationHistory = []
   let dgLive = null
+  let dgReady = false          // true only after Deepgram 'open' fires
+  let audioQueue = []          // buffer Twilio audio until Deepgram is ready
   let isProcessing = false
   let speechBuffer = ''
   let silenceTimer = null
@@ -166,6 +168,13 @@ wss.on('connection', (twilioWs) => {
 
     connection.on('open', () => {
       console.log('Deepgram connected')
+      dgReady = true
+      // Flush any audio that arrived before connection was ready
+      if (audioQueue.length > 0) {
+        console.log(`Flushing ${audioQueue.length} buffered audio packets`)
+        audioQueue.forEach(chunk => connection.send(chunk))
+        audioQueue = []
+      }
     })
 
     connection.on('Results', (data) => {
@@ -341,7 +350,11 @@ wss.on('connection', (twilioWs) => {
       case 'media':
         if (dgLive) {
           const audioData = Buffer.from(msg.media.payload, 'base64')
-          dgLive.send(audioData)
+          if (dgReady) {
+            dgLive.send(audioData)
+          } else {
+            audioQueue.push(audioData)
+          }
         }
         break
 
