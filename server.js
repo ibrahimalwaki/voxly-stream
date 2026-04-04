@@ -34,7 +34,7 @@ function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.en
 const PORT = process.env.PORT || 8080
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Voxly, the AI receptionist for Bright Smile Dental. You handle patient calls exactly like a warm, experienced human receptionist.
+const SYSTEM_PROMPT = `You are Aria, the AI receptionist for Bright Smile Dental. You handle patient calls exactly like a warm, experienced human receptionist.
 
 ## VOICE RULES — follow on every single turn
 1. ONE question per response. Never ask two things at once.
@@ -88,7 +88,7 @@ STEP 7 — Final read-back and confirmation
   Only say "You're all set!" after explicit confirmation.
 
 ## STEP 8 — Demo pitch (always do this after "You're all set!")
-  Say: "Before I let you go — I want to share something with you. I'm Voxly, an AI receptionist built by Voxly. What you just experienced is exactly what your clinic's patients would hear 24 hours a day, 7 days a week. Most dental clinics miss 5 to 10 calls a day — I answer every single one. Would you be open to a quick 15-minute call with our founder Ibrahim?"
+  Say: "Before I let you go — I want to share something with you. I'm Aria, an AI receptionist built by Voxly. What you just experienced is exactly what your clinic's patients would hear 24 hours a day, 7 days a week. Most dental clinics miss 5 to 10 calls a day — I answer every single one. Would you be open to a quick 15-minute call with our founder Ibrahim?"
 
   If yes:
     Ask: "What's the best number to reach you?"
@@ -106,7 +106,7 @@ STEP 7 — Final read-back and confirmation
 
   If they ask how it works:
     Say: "It plugs directly into your phone line and booking system — Ibrahim handles the entire setup for you. Want me to grab your number and email so he can reach out?"
-
+    
 ## Transfer to Human
 Only if caller explicitly says "talk to a person", "transfer me", "speak to someone", "real person", "human".
 Say: "Of course — press 9 on your keypad to be connected right now." then output: [TRANSFER_TO_HUMAN]`
@@ -147,8 +147,6 @@ wss.on('connection', (twilioWs) => {
   let callSid = null
   let conversationHistory = []
   let dgLive = null
-  let dgReady = false          // true only after Deepgram 'open' fires
-  let audioQueue = []          // buffer Twilio audio until Deepgram is ready
   let isProcessing = false
   let speechBuffer = ''
   let silenceTimer = null
@@ -168,13 +166,6 @@ wss.on('connection', (twilioWs) => {
 
     connection.on('open', () => {
       console.log('Deepgram connected')
-      dgReady = true
-      // Flush any audio that arrived before connection was ready
-      if (audioQueue.length > 0) {
-        console.log(`Flushing ${audioQueue.length} buffered audio packets`)
-        audioQueue.forEach(chunk => connection.send(chunk))
-        audioQueue = []
-      }
     })
 
     connection.on('Results', (data) => {
@@ -240,7 +231,7 @@ wss.on('connection', (twilioWs) => {
       const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
       aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
 
-      console.log('Voxly:', aiText)
+      console.log('Aria:', aiText)
       conversationHistory.push({ role: 'assistant', content: aiText })
 
       // 2. Generate TTS audio from OpenAI
@@ -269,6 +260,7 @@ wss.on('connection', (twilioWs) => {
           }))
         }
 
+        // Mark end of audio
         twilioWs.send(JSON.stringify({
           event: 'mark',
           streamSid,
@@ -276,27 +268,28 @@ wss.on('connection', (twilioWs) => {
         }))
       }
 
-      // Release immediately — Twilio buffers audio, caller can't speak until it finishes anyway
-      isProcessing = false
-
+      // Handle transfer
       if (transferRequested) {
-        const audioDurationMs = (audioBuffer.length / 8000) * 1000
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
-            twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
+            twilioWs.send(JSON.stringify({
+              event: 'stop',
+              streamSid,
+            }))
           }
-        }, audioDurationMs + 500)
+        }, audioBuffer.length * 1000 / 8000 + 500)
       }
 
     } catch (err) {
       console.error('Pipeline error:', err)
+    } finally {
       isProcessing = false
     }
   }
 
   // ── GREETING ───────────────────────────────────────────────────────────────
   async function sendGreeting() {
-    const greeting = "Hello, thank you for calling Bright Smile Dental — this is Voxly, how can I help you today?"
+    const greeting = "Hello, thank you for calling Bright Smile Dental — this is Aria, how can I help you today?"
     conversationHistory.push({ role: 'assistant', content: greeting })
 
     try {
@@ -350,11 +343,7 @@ wss.on('connection', (twilioWs) => {
       case 'media':
         if (dgLive) {
           const audioData = Buffer.from(msg.media.payload, 'base64')
-          if (dgReady) {
-            dgLive.send(audioData)
-          } else {
-            audioQueue.push(audioData)
-          }
+          dgLive.send(audioData)
         }
         break
 
