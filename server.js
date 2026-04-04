@@ -4,9 +4,10 @@ const { createClient } = require('@deepgram/sdk')
 const Groq = require('groq-sdk')
 const OpenAI = require('openai')
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY)
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+let _deepgram, _groq, _openai
+function getDG() { return _deepgram || (_deepgram = createClient(process.env.DEEPGRAM_API_KEY)) }
+function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GROQ_API_KEY })) }
+function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })) }
 
 const PORT = process.env.PORT || 8080
 
@@ -92,7 +93,7 @@ wss.on('connection', (twilioWs) => {
 
   // ── DEEPGRAM LIVE STT ──────────────────────────────────────────────────────
   async function startDeepgram() {
-    const connection = deepgram.listen.live({
+    const connection = getDG().listen.live({
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
@@ -150,7 +151,7 @@ wss.on('connection', (twilioWs) => {
 
     try {
       // 1. Get AI response from Groq
-      const completion = await groq.chat.completions.create({
+      const completion = await getGroq().chat.completions.create({
         model: 'llama-3.3-70b-versatile',
         max_tokens: 120,
         temperature: 0.6,
@@ -168,7 +169,7 @@ wss.on('connection', (twilioWs) => {
       conversationHistory.push({ role: 'assistant', content: aiText })
 
       // 2. Generate TTS audio from OpenAI
-      const ttsResponse = await openai.audio.speech.create({
+      const ttsResponse = await getOAI().audio.speech.create({
         model: 'tts-1',
         voice: 'nova',
         input: aiText,
@@ -225,7 +226,7 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'assistant', content: greeting })
 
     try {
-      const ttsResponse = await openai.audio.speech.create({
+      const ttsResponse = await getOAI().audio.speech.create({
         model: 'tts-1',
         voice: 'nova',
         input: greeting,
