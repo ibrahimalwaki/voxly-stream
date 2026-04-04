@@ -148,6 +148,8 @@ wss.on('connection', (twilioWs) => {
   let callSid = null
   let conversationHistory = []
   let dgLive = null
+  let dgReady = false
+  let pendingAudioFrames = []
   let isProcessing = false
   let speechBuffer = ''
   let silenceTimer = null
@@ -158,8 +160,7 @@ wss.on('connection', (twilioWs) => {
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
-      interim_results: true,
-      utterance_end_ms: 1000,
+      interim_results: false,
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -167,6 +168,15 @@ wss.on('connection', (twilioWs) => {
 
     connection.on('open', () => {
       console.log('Deepgram connected')
+      dgReady = true
+
+      if (pendingAudioFrames.length > 0) {
+        for (const frame of pendingAudioFrames) {
+          connection.send(frame)
+        }
+        console.log(`Flushed ${pendingAudioFrames.length} queued audio frames to Deepgram`)
+        pendingAudioFrames = []
+      }
     })
 
     connection.on('Results', (data) => {
@@ -176,12 +186,6 @@ wss.on('connection', (twilioWs) => {
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
 
-      // Only trigger early if the sentence sounds complete (ends with punctuation
-      // or is a short clear answer like "yes", "no", a number, or a name)
-      const looksComplete = /[.!?]$/.test(speechBuffer) ||
-        /^(yes|no|yeah|nope|sure|okay|ok|correct|right|that'?s? right|sounds good)$/i.test(speechBuffer.trim()) ||
-        speechBuffer.trim().split(' ').length <= 4
-
       clearTimeout(silenceTimer)
       silenceTimer = setTimeout(() => {
         if (speechBuffer && !isProcessing) {
@@ -189,11 +193,11 @@ wss.on('connection', (twilioWs) => {
           speechBuffer = ''
           handleUserSpeech(text)
         }
-      }, looksComplete ? 400 : 900) // short answers: 400ms, longer speech: 900ms
+      }, 700)
     })
 
     connection.on('UtteranceEnd', () => {
-      // Always fires after 1s silence — catches anything the timer missed
+      // Fallback in case Deepgram emits utterance end after the final result timer
       if (speechBuffer && !isProcessing) {
         clearTimeout(silenceTimer)
         const text = speechBuffer
@@ -202,8 +206,19 @@ wss.on('connection', (twilioWs) => {
       }
     })
 
-    connection.on('error', (err) => console.error('Deepgram error:', err))
-    connection.on('close', () => console.log('Deepgram closed'))
+    connection.on('error', (err) => {
+      console.error('Deepgram error:', {
+        message: err?.message,
+        type: err?.type,
+        code: err?.code,
+        reason: err?.reason,
+      })
+    })
+    connection.on('close', () => {
+      dgReady = false
+      pendingAudioFrames = []
+      console.log('Deepgram closed')
+    })
 
     return connection
   }
@@ -344,7 +359,11 @@ wss.on('connection', (twilioWs) => {
       case 'media':
         if (dgLive) {
           const audioData = Buffer.from(msg.media.payload, 'base64')
-          dgLive.send(audioData)
+          if (dgReady) {
+            dgLive.send(audioData)
+          } else {
+            pendingAudioFrames.push(audioData)
+          }
         }
         break
 
