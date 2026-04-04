@@ -260,7 +260,6 @@ wss.on('connection', (twilioWs) => {
           }))
         }
 
-        // Mark end of audio
         twilioWs.send(JSON.stringify({
           event: 'mark',
           streamSid,
@@ -268,21 +267,21 @@ wss.on('connection', (twilioWs) => {
         }))
       }
 
+      // Release lock after estimated audio duration so caller can speak again
+      const audioDurationMs = (audioBuffer.length / 8000) * 1000
+      setTimeout(() => { isProcessing = false }, audioDurationMs + 300)
+
       // Handle transfer
       if (transferRequested) {
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'stop',
-              streamSid,
-            }))
+            twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
           }
-        }, audioBuffer.length * 1000 / 8000 + 500)
+        }, audioDurationMs + 500)
       }
 
     } catch (err) {
       console.error('Pipeline error:', err)
-    } finally {
       isProcessing = false
     }
   }
