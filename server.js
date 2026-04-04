@@ -122,7 +122,6 @@ wss.on('connection', (twilioWs) => {
       language: 'en-US',
       smart_format: true,
       interim_results: false,   // only fire on final transcripts — prevents partial triggers
-      utterance_end_ms: 800,    // wait 0.8s of silence before declaring utterance done
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -168,7 +167,14 @@ wss.on('connection', (twilioWs) => {
       }
     })
 
-    connection.on('error', (err) => console.error('Deepgram error:', err))
+    connection.on('error', (err) => {
+      console.error('Deepgram error:', {
+        message: err?.message,
+        type: err?.type,
+        code: err?.code,
+        reason: err?.reason,
+      })
+    })
     connection.on('close', () => {
       dgReady = false
       pendingAudioFrames = []
