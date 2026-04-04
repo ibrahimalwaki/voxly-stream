@@ -4,6 +4,25 @@ const { createClient } = require('@deepgram/sdk')
 const Groq = require('groq-sdk')
 const OpenAI = require('openai')
 
+// Convert 16-bit PCM to 8-bit mulaw (G.711)
+function pcm16ToMulaw(pcmBuffer) {
+  const MULAW_MAX = 0x1FFF
+  const MULAW_BIAS = 33
+  const out = Buffer.alloc(pcmBuffer.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    let sample = pcmBuffer.readInt16LE(i * 2)
+    const sign = (sample >> 8) & 0x80
+    if (sign) sample = -sample
+    if (sample > MULAW_MAX) sample = MULAW_MAX
+    sample += MULAW_BIAS
+    let exp = 7
+    for (let expMask = 0x4000; (sample & expMask) === 0 && exp > 0; exp--, expMask >>= 1) {}
+    const mantissa = (sample >> (exp + 3)) & 0x0F
+    out[i] = ~(sign | (exp << 4) | mantissa) & 0xFF
+  }
+  return out
+}
+
 let _deepgram, _groq, _openai
 function getDG() { return _deepgram || (_deepgram = createClient(process.env.DEEPGRAM_API_KEY)) }
 function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GROQ_API_KEY })) }
@@ -173,17 +192,18 @@ wss.on('connection', (twilioWs) => {
         model: 'tts-1',
         voice: 'nova',
         input: aiText,
-        response_format: 'ulaw',
+        response_format: 'pcm',
         speed: 1.0,
       })
 
-      const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const audioBuffer = pcm16ToMulaw(pcmBuffer)
 
       // 3. Send audio back to Twilio in chunks
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         const chunkSize = 160 // 20ms of audio at 8kHz mulaw
         for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-          const chunk = audioBuffer.slice(i, i + chunkSize)
+          const chunk = audioBuffer.subarray(i, i + chunkSize)
           twilioWs.send(JSON.stringify({
             event: 'media',
             streamSid,
@@ -230,16 +250,17 @@ wss.on('connection', (twilioWs) => {
         model: 'tts-1',
         voice: 'nova',
         input: greeting,
-        response_format: 'ulaw',
+        response_format: 'pcm',
         speed: 1.0,
       })
 
-      const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const audioBuffer = pcm16ToMulaw(pcmBuffer)
 
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         const chunkSize = 160
         for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-          const chunk = audioBuffer.slice(i, i + chunkSize)
+          const chunk = audioBuffer.subarray(i, i + chunkSize)
           twilioWs.send(JSON.stringify({
             event: 'media',
             streamSid,
@@ -268,7 +289,8 @@ wss.on('connection', (twilioWs) => {
         callSid = msg.start.callSid
         console.log('Stream started:', streamSid)
         dgLive = await startDeepgram()
-        await sendGreeting()
+        // Small delay to ensure Twilio stream is ready to receive audio
+        setTimeout(() => sendGreeting(), 500)
         break
 
       case 'media':
