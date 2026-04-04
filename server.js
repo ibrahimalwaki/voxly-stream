@@ -59,12 +59,12 @@ General Dentistry, Cleanings, Fillings, Extractions, Root Canal, Crowns, Implant
 ## Booking Flow (collect one at a time, skip if already given)
 1. Full name
 2. Best callback number
-3. Email address (for confirmation)
+3. Email address — when they give it, ALWAYS repeat it back letter by letter and ask "Is that correct?" before moving on. Example: they say "jackson at gmail dot com" → you say "Let me confirm: j-a-c-k-s-o-n at gmail dot com — is that right?"
 4. Service needed
 5. Preferred day/time
 6. If new patient — do they have dental insurance?
 
-Final confirmation: "Just to confirm: [name], [service] on [day/time]. We'll reach you at [number] and send a confirmation to [email]. You're all set!"
+CRITICAL — Final confirmation: Only say "You're all set!" AFTER the caller has explicitly confirmed everything is correct. Never assume confirmation. Always wait for the caller to say "yes", "correct", "that's right", or similar before wrapping up.
 
 ## Transfer to Human
 Only if caller explicitly asks for a human ("talk to a person", "transfer me", "speak to someone").
@@ -119,8 +119,8 @@ wss.on('connection', (twilioWs) => {
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
-      interim_results: true,
-      utterance_end_ms: 1000,
+      interim_results: false,   // only fire on final transcripts — prevents partial triggers
+      utterance_end_ms: 1200,   // wait 1.2s of silence before declaring utterance done
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -132,28 +132,19 @@ wss.on('connection', (twilioWs) => {
 
     connection.on('Results', (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript
-      if (!transcript) return
+      if (!transcript || !data.is_final) return
 
-      if (data.is_final) {
-        speechBuffer += ' ' + transcript
-        speechBuffer = speechBuffer.trim()
-
-        // Reset silence timer on each final transcript
-        clearTimeout(silenceTimer)
-        silenceTimer = setTimeout(() => {
-          if (speechBuffer && !isProcessing) {
-            handleUserSpeech(speechBuffer)
-            speechBuffer = ''
-          }
-        }, 700)
-      }
+      speechBuffer += ' ' + transcript
+      speechBuffer = speechBuffer.trim()
     })
 
     connection.on('UtteranceEnd', () => {
+      // Only trigger after Deepgram confirms the utterance is fully done
       if (speechBuffer && !isProcessing) {
         clearTimeout(silenceTimer)
-        handleUserSpeech(speechBuffer)
+        const text = speechBuffer
         speechBuffer = ''
+        handleUserSpeech(text)
       }
     })
 
