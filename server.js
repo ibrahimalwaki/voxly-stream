@@ -1,7 +1,7 @@
 const http = require('http')
 const { WebSocketServer } = require('ws')
 const { createClient } = require('@deepgram/sdk')
-const { GoogleGenerativeAI } = require('@google/generative-ai')
+const Groq = require('groq-sdk')
 const OpenAI = require('openai')
 
 // Downsample 16-bit PCM from 24kHz to 8kHz (3:1) then convert to mulaw
@@ -26,9 +26,9 @@ function pcm24kTo8kMulaw(pcmBuffer) {
   return out
 }
 
-let _deepgram, _gemini, _openai
+let _deepgram, _groq, _openai
 function getDG() { return _deepgram || (_deepgram = createClient(process.env.DEEPGRAM_API_KEY)) }
-function getGemini() { return _gemini || (_gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)) }
+function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GROQ_API_KEY })) }
 function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })) }
 
 const PORT = process.env.PORT || 8080
@@ -228,16 +228,21 @@ wss.on('connection', (twilioWs) => {
     const appUrl = process.env.VOXLY_APP_URL
     if (!appUrl) return
 
-    const extractModel = getGemini().getGenerativeModel({ model: 'gemini-2.0-flash' })
     const transcript = history.map(m => `${m.role === 'assistant' ? 'Aria' : 'Caller'}: ${m.content}`).join('\n')
 
-    const extractResult = await extractModel.generateContent(
-      `Extract the booking details from this call transcript. Return ONLY valid JSON with these exact keys: patient_name, patient_phone, patient_email, service, preferred_time, notes. Use null for missing values. preferred_time should be a human-readable string like "Thursday afternoon" or an ISO date if one was given. notes can include insurance info or anything else relevant.\n\nTranscript:\n${transcript}`
-    )
+    const extractResult = await getGroq().chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      max_tokens: 200,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: 'Extract booking details from a call transcript. Return ONLY valid JSON with keys: patient_name, patient_phone, patient_email, service, preferred_time, notes. Use null for missing values.' },
+        { role: 'user', content: transcript },
+      ],
+    })
 
     let booking
     try {
-      const raw = extractResult.response.text().replace(/```json|```/g, '').trim()
+      const raw = extractResult.choices[0]?.message?.content?.replace(/```json|```/g, '').trim()
       booking = JSON.parse(raw)
     } catch {
       console.error('Failed to parse booking JSON from Gemini')
@@ -266,34 +271,18 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get AI response from Gemini
-      const model = getGemini().getGenerativeModel({
-        model: 'gemini-2.0-flash',
-        systemInstruction: SYSTEM_PROMPT,
-        generationConfig: { maxOutputTokens: 120, temperature: 0.6 },
+      // 1. Get AI response from Groq
+      const completion = await getGroq().chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        max_tokens: 120,
+        temperature: 0.6,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...conversationHistory,
+        ],
       })
-      // Build history: exclude the current user message (last item), skip leading model turns,
-      // and ensure alternating user/model roles (Gemini requirement)
-      const rawHistory = conversationHistory.slice(0, -1)
-      const geminiHistory = []
-      for (const m of rawHistory) {
-        const role = m.role === 'assistant' ? 'model' : 'user'
-        const last = geminiHistory[geminiHistory.length - 1]
-        if (last && last.role === role) {
-          // Merge consecutive same-role turns
-          last.parts[0].text += '\n' + m.content
-        } else {
-          geminiHistory.push({ role, parts: [{ text: m.content }] })
-        }
-      }
-      // Gemini requires history to start with user turn
-      while (geminiHistory.length > 0 && geminiHistory[0].role === 'model') {
-        geminiHistory.shift()
-      }
-      const chat = model.startChat({ history: geminiHistory })
-      const result = await chat.sendMessage(text)
 
-      let aiText = result.response.text() || "I'm sorry, could you repeat that?"
+      let aiText = completion.choices[0]?.message?.content || "I'm sorry, could you repeat that?"
       const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
       aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
 
