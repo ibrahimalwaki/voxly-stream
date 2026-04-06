@@ -307,8 +307,8 @@ wss.on('connection', (twilioWs) => {
 
       // 2. Generate TTS audio from OpenAI
       const ttsResponse = await getOAI().audio.speech.create({
-        model: 'tts-1',
-        voice: 'nova',
+        model: 'gpt-4o-mini-tts',
+        voice: 'marin',
         input: aiText,
         response_format: 'pcm',
         speed: 1.0,
@@ -365,8 +365,8 @@ wss.on('connection', (twilioWs) => {
 
     try {
       const ttsResponse = await getOAI().audio.speech.create({
-        model: 'tts-1',
-        voice: 'nova',
+        model: 'gpt-4o-mini-tts',
+        voice: 'marin',
         input: greeting,
         response_format: 'pcm',
         speed: 1.0,
