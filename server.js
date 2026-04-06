@@ -272,10 +272,24 @@ wss.on('connection', (twilioWs) => {
         systemInstruction: SYSTEM_PROMPT,
         generationConfig: { maxOutputTokens: 120, temperature: 0.6 },
       })
-      const geminiHistory = conversationHistory.slice(0, -1).map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }))
+      // Build history: exclude the current user message (last item), skip leading model turns,
+      // and ensure alternating user/model roles (Gemini requirement)
+      const rawHistory = conversationHistory.slice(0, -1)
+      const geminiHistory = []
+      for (const m of rawHistory) {
+        const role = m.role === 'assistant' ? 'model' : 'user'
+        const last = geminiHistory[geminiHistory.length - 1]
+        if (last && last.role === role) {
+          // Merge consecutive same-role turns
+          last.parts[0].text += '\n' + m.content
+        } else {
+          geminiHistory.push({ role, parts: [{ text: m.content }] })
+        }
+      }
+      // Gemini requires history to start with user turn
+      while (geminiHistory.length > 0 && geminiHistory[0].role === 'model') {
+        geminiHistory.shift()
+      }
       const chat = model.startChat({ history: geminiHistory })
       const result = await chat.sendMessage(text)
 
