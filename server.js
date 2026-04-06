@@ -12,7 +12,6 @@ function pcm24kTo8kMulaw(pcmBuffer) {
   const outSamples = Math.floor(samples / 3)
   const out = Buffer.alloc(outSamples)
   for (let i = 0; i < outSamples; i++) {
-    // Simple decimation: take every 3rd sample
     let sample = pcmBuffer.readInt16LE(i * 6)
     const sign = (sample >> 8) & 0x80
     if (sign) sample = -sample
@@ -112,7 +111,7 @@ STEP 8 — Demo pitch (always do this after "You're all set!")
 Only if caller explicitly says "talk to a person", "transfer me", "speak to someone", "real person", "human".
 Say: "Of course — press 9 on your keypad to be connected right now." then output: [TRANSFER_TO_HUMAN]`
 
-// ── HTTP SERVER (for Twilio webhook + health check) ───────────────────────────
+// ── HTTP SERVER ───────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200)
@@ -121,7 +120,6 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/voice') {
-    // Twilio calls this when a call comes in — respond with TwiML to start stream
     const host = req.headers.host
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -154,6 +152,51 @@ wss.on('connection', (twilioWs) => {
   let speechBuffer = ''
   let silenceTimer = null
 
+  // ── STREAM TTS → TWILIO (sends audio as it arrives, no waiting) ────────────
+  async function streamTtsToTwilio(text) {
+    if (!text.trim() || !streamSid || twilioWs.readyState !== twilioWs.OPEN) return
+
+    const response = await getOAI().audio.speech.create({
+      model: 'gpt-4o-mini-tts',
+      voice: 'marin',
+      input: text,
+      response_format: 'pcm',
+      speed: 1.0,
+    })
+
+    let leftover = Buffer.alloc(0)
+    for await (const rawChunk of response.body) {
+      const buf = Buffer.concat([leftover, Buffer.from(rawChunk)])
+      // Need multiples of 6 bytes (3 input samples × 2 bytes per sample → 1 output sample)
+      const processable = Math.floor(buf.length / 6) * 6
+      if (processable > 0) {
+        const mulaw = pcm24kTo8kMulaw(buf.subarray(0, processable))
+        sendMulawToTwilio(mulaw)
+        leftover = buf.subarray(processable)
+      } else {
+        leftover = buf
+      }
+    }
+    // Flush remaining bytes (pad to multiple of 6)
+    if (leftover.length > 0) {
+      const padded = Buffer.alloc(Math.ceil(leftover.length / 6) * 6)
+      leftover.copy(padded)
+      sendMulawToTwilio(pcm24kTo8kMulaw(padded))
+    }
+  }
+
+  function sendMulawToTwilio(audioBuffer) {
+    if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return
+    const chunkSize = 160 // 20ms at 8kHz
+    for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+      twilioWs.send(JSON.stringify({
+        event: 'media',
+        streamSid,
+        media: { payload: audioBuffer.subarray(i, i + chunkSize).toString('base64') },
+      }))
+    }
+  }
+
   // ── DEEPGRAM LIVE STT ──────────────────────────────────────────────────────
   async function startDeepgram() {
     const connection = getDG().listen.live({
@@ -169,12 +212,9 @@ wss.on('connection', (twilioWs) => {
     connection.on('open', () => {
       console.log('Deepgram connected')
       dgReady = true
-
       if (pendingAudioFrames.length > 0) {
-        for (const frame of pendingAudioFrames) {
-          connection.send(frame)
-        }
-        console.log(`Flushed ${pendingAudioFrames.length} queued audio frames to Deepgram`)
+        for (const frame of pendingAudioFrames) connection.send(frame)
+        console.log(`Flushed ${pendingAudioFrames.length} queued frames`)
         pendingAudioFrames = []
       }
     })
@@ -193,11 +233,10 @@ wss.on('connection', (twilioWs) => {
           speechBuffer = ''
           handleUserSpeech(text)
         }
-      }, 700)
+      }, 500)
     })
 
     connection.on('UtteranceEnd', () => {
-      // Fallback in case Deepgram emits utterance end after the final result timer
       if (speechBuffer && !isProcessing) {
         clearTimeout(silenceTimer)
         const text = speechBuffer
@@ -207,12 +246,7 @@ wss.on('connection', (twilioWs) => {
     })
 
     connection.on('error', (err) => {
-      console.error('Deepgram error:', {
-        message: err?.message,
-        type: err?.type,
-        code: err?.code,
-        reason: err?.reason,
-      })
+      console.error('Deepgram error:', { message: err?.message, code: err?.code })
     })
     connection.on('close', () => {
       dgReady = false
@@ -223,7 +257,7 @@ wss.on('connection', (twilioWs) => {
     return connection
   }
 
-  // ── EXTRACT BOOKING DATA AND POST TO DENTAL SAAS ──────────────────────────
+  // ── SAVE BOOKING TO DENTAL SAAS ────────────────────────────────────────────
   async function saveBooking(history) {
     const appUrl = process.env.VOXLY_APP_URL
     if (!appUrl) return
@@ -245,7 +279,7 @@ wss.on('connection', (twilioWs) => {
       const raw = extractResult.choices[0]?.message?.content?.replace(/```json|```/g, '').trim()
       booking = JSON.parse(raw)
     } catch {
-      console.error('Failed to parse booking JSON from Gemini')
+      console.error('Failed to parse booking JSON')
       return
     }
 
@@ -255,14 +289,11 @@ wss.on('connection', (twilioWs) => {
       body: JSON.stringify(booking),
     })
 
-    if (res.ok) {
-      console.log('Booking saved to Supabase:', booking.patient_name)
-    } else {
-      console.error('Booking API error:', res.status, await res.text())
-    }
+    if (res.ok) console.log('Booking saved:', booking.patient_name)
+    else console.error('Booking API error:', res.status, await res.text())
   }
 
-  // ── HANDLE USER SPEECH → GEMINI → TTS → TWILIO ──────────────────────────────
+  // ── HANDLE USER SPEECH: stream Groq → sentence TTS → Twilio ───────────────
   async function handleUserSpeech(text) {
     if (!text.trim() || isProcessing) return
     isProcessing = true
@@ -271,73 +302,74 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get AI response from Groq
-      const completion = await getGroq().chat.completions.create({
+      // Stream Groq tokens
+      const groqStream = await getGroq().chat.completions.create({
         model: 'llama-3.3-70b-versatile',
-        max_tokens: 120,
+        max_tokens: 150,
         temperature: 0.6,
+        stream: true,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           ...conversationHistory,
         ],
       })
 
-      let aiText = completion.choices[0]?.message?.content || "I'm sorry, could you repeat that?"
-      const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
-      aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
+      let tokenBuffer = ''
+      let fullAiText = ''
+      // TTS sentences run sequentially via promise chain
+      let ttsChain = Promise.resolve()
 
-      console.log('Aria:', aiText)
-      conversationHistory.push({ role: 'assistant', content: aiText })
+      function flushSentence(sentence) {
+        sentence = sentence.replace('[TRANSFER_TO_HUMAN]', '').trim()
+        if (!sentence) return
+        ttsChain = ttsChain.then(() => streamTtsToTwilio(sentence))
+      }
 
-      // If booking just confirmed, extract and save it
-      if (aiText.toLowerCase().includes("you're all set")) {
+      for await (const chunk of groqStream) {
+        const token = chunk.choices[0]?.delta?.content || ''
+        if (!token) continue
+        tokenBuffer += token
+        fullAiText += token
+
+        // Flush complete sentences as they arrive
+        const sentenceRegex = /[^.!?]+[.!?]+\s*/g
+        let match
+        let lastIndex = 0
+        while ((match = sentenceRegex.exec(tokenBuffer)) !== null) {
+          flushSentence(match[0])
+          lastIndex = sentenceRegex.lastIndex
+        }
+        tokenBuffer = tokenBuffer.slice(lastIndex)
+      }
+
+      // Flush any remaining text (no sentence-ending punctuation)
+      if (tokenBuffer.trim()) flushSentence(tokenBuffer)
+
+      // Wait for all TTS to finish
+      await ttsChain
+
+      // Send end mark
+      if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
+        twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'end_of_response' } }))
+      }
+
+      fullAiText = fullAiText.trim()
+      const transferRequested = fullAiText.includes('[TRANSFER_TO_HUMAN]')
+      fullAiText = fullAiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
+
+      console.log('Aria:', fullAiText)
+      conversationHistory.push({ role: 'assistant', content: fullAiText })
+
+      if (fullAiText.toLowerCase().includes("you're all set")) {
         saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
       }
 
-      // 2. Generate TTS audio from OpenAI
-      const ttsResponse = await getOAI().audio.speech.create({
-        model: 'tts-1',
-        voice: 'nova',
-        input: aiText,
-        response_format: 'pcm',
-        speed: 1.0,
-      })
-
-      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
-      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
-
-      // 3. Send audio back to Twilio in chunks
-      if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        const chunkSize = 160 // 20ms of audio at 8kHz mulaw
-        for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-          const chunk = audioBuffer.subarray(i, i + chunkSize)
-          twilioWs.send(JSON.stringify({
-            event: 'media',
-            streamSid,
-            media: {
-              payload: chunk.toString('base64'),
-            },
-          }))
-        }
-
-        // Mark end of audio
-        twilioWs.send(JSON.stringify({
-          event: 'mark',
-          streamSid,
-          mark: { name: 'end_of_response' },
-        }))
-      }
-
-      // Handle transfer
       if (transferRequested) {
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'stop',
-              streamSid,
-            }))
+            twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
           }
-        }, audioBuffer.length * 1000 / 8000 + 500)
+        }, 1000)
       }
 
     } catch (err) {
@@ -351,34 +383,10 @@ wss.on('connection', (twilioWs) => {
   async function sendGreeting() {
     const greeting = "Hello, thank you for calling Bright Smile Dental — this is Aria, how can I help you today?"
     conversationHistory.push({ role: 'assistant', content: greeting })
-
     try {
-      const ttsResponse = await getOAI().audio.speech.create({
-        model: 'tts-1',
-        voice: 'nova',
-        input: greeting,
-        response_format: 'pcm',
-        speed: 1.0,
-      })
-
-      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
-      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
-
+      await streamTtsToTwilio(greeting)
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        const chunkSize = 160
-        for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-          const chunk = audioBuffer.subarray(i, i + chunkSize)
-          twilioWs.send(JSON.stringify({
-            event: 'media',
-            streamSid,
-            media: { payload: chunk.toString('base64') },
-          }))
-        }
-        twilioWs.send(JSON.stringify({
-          event: 'mark',
-          streamSid,
-          mark: { name: 'greeting_end' },
-        }))
+        twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'greeting_end' } }))
       }
     } catch (err) {
       console.error('Greeting error:', err)
@@ -396,18 +404,14 @@ wss.on('connection', (twilioWs) => {
         callSid = msg.start.callSid
         console.log('Stream started:', streamSid)
         dgLive = await startDeepgram()
-        // Small delay to ensure Twilio stream is ready to receive audio
         setTimeout(() => sendGreeting(), 500)
         break
 
       case 'media':
         if (dgLive) {
           const audioData = Buffer.from(msg.media.payload, 'base64')
-          if (dgReady) {
-            dgLive.send(audioData)
-          } else {
-            pendingAudioFrames.push(audioData)
-          }
+          if (dgReady) dgLive.send(audioData)
+          else pendingAudioFrames.push(audioData)
         }
         break
 
