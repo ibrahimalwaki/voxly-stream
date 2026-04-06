@@ -1,7 +1,7 @@
 const http = require('http')
 const { WebSocketServer } = require('ws')
 const { createClient } = require('@deepgram/sdk')
-const Groq = require('groq-sdk')
+const { GoogleGenerativeAI } = require('@google/generative-ai')
 const OpenAI = require('openai')
 
 // Downsample 16-bit PCM from 24kHz to 8kHz (3:1) then convert to mulaw
@@ -26,9 +26,9 @@ function pcm24kTo8kMulaw(pcmBuffer) {
   return out
 }
 
-let _deepgram, _groq, _openai
+let _deepgram, _gemini, _openai
 function getDG() { return _deepgram || (_deepgram = createClient(process.env.DEEPGRAM_API_KEY)) }
-function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GROQ_API_KEY })) }
+function getGemini() { return _gemini || (_gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)) }
 function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })) }
 
 const PORT = process.env.PORT || 8080
@@ -232,18 +232,20 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get AI response from Groq
-      const completion = await getGroq().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 120,
-        temperature: 0.6,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...conversationHistory,
-        ],
+      // 1. Get AI response from Gemini
+      const model = getGemini().getGenerativeModel({
+        model: 'gemini-2.0-flash',
+        systemInstruction: SYSTEM_PROMPT,
+        generationConfig: { maxOutputTokens: 120, temperature: 0.6 },
       })
+      const geminiHistory = conversationHistory.slice(0, -1).map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }))
+      const chat = model.startChat({ history: geminiHistory })
+      const result = await chat.sendMessage(text)
 
-      let aiText = completion.choices[0]?.message?.content || "I'm sorry, could you repeat that?"
+      let aiText = result.response.text() || "I'm sorry, could you repeat that?"
       const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
       aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
 

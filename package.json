@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@deepgram/sdk": "^3.9.0",
+    "@google/generative-ai": "^0.24.1",
     "groq-sdk": "^1.1.2",
     "openai": "^6.33.0",
     "ws": "^8.18.0"
