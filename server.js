@@ -223,7 +223,41 @@ wss.on('connection', (twilioWs) => {
     return connection
   }
 
-  // ── HANDLE USER SPEECH → GROQ → TTS → TWILIO ──────────────────────────────
+  // ── EXTRACT BOOKING DATA AND POST TO DENTAL SAAS ──────────────────────────
+  async function saveBooking(history) {
+    const appUrl = process.env.VOXLY_APP_URL
+    if (!appUrl) return
+
+    const extractModel = getGemini().getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const transcript = history.map(m => `${m.role === 'assistant' ? 'Aria' : 'Caller'}: ${m.content}`).join('\n')
+
+    const extractResult = await extractModel.generateContent(
+      `Extract the booking details from this call transcript. Return ONLY valid JSON with these exact keys: patient_name, patient_phone, patient_email, service, preferred_time, notes. Use null for missing values. preferred_time should be a human-readable string like "Thursday afternoon" or an ISO date if one was given. notes can include insurance info or anything else relevant.\n\nTranscript:\n${transcript}`
+    )
+
+    let booking
+    try {
+      const raw = extractResult.response.text().replace(/```json|```/g, '').trim()
+      booking = JSON.parse(raw)
+    } catch {
+      console.error('Failed to parse booking JSON from Gemini')
+      return
+    }
+
+    const res = await fetch(`${appUrl}/api/appointments/demo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(booking),
+    })
+
+    if (res.ok) {
+      console.log('Booking saved to Supabase:', booking.patient_name)
+    } else {
+      console.error('Booking API error:', res.status, await res.text())
+    }
+  }
+
+  // ── HANDLE USER SPEECH → GEMINI → TTS → TWILIO ──────────────────────────────
   async function handleUserSpeech(text) {
     if (!text.trim() || isProcessing) return
     isProcessing = true
@@ -251,6 +285,11 @@ wss.on('connection', (twilioWs) => {
 
       console.log('Aria:', aiText)
       conversationHistory.push({ role: 'assistant', content: aiText })
+
+      // If booking just confirmed, extract and save it
+      if (aiText.toLowerCase().includes("you're all set")) {
+        saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
+      }
 
       // 2. Generate TTS audio from OpenAI
       const ttsResponse = await getOAI().audio.speech.create({
