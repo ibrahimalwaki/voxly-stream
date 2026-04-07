@@ -1,7 +1,6 @@
 const http = require('http')
 const { WebSocketServer } = require('ws')
 const { createClient } = require('@deepgram/sdk')
-const Groq = require('groq-sdk')
 const OpenAI = require('openai')
 
 // Downsample 16-bit PCM from 24kHz to 8kHz (3:1) then convert to mulaw
@@ -26,9 +25,8 @@ function pcm24kTo8kMulaw(pcmBuffer) {
   return out
 }
 
-let _deepgram, _groq, _openai
+let _deepgram, _openai
 function getDG() { return _deepgram || (_deepgram = createClient(process.env.DEEPGRAM_API_KEY)) }
-function getGroq() { return _groq || (_groq = new Groq({ apiKey: process.env.GROQ_API_KEY })) }
 function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })) }
 
 const PORT = process.env.PORT || 8080
@@ -236,8 +234,8 @@ wss.on('connection', (twilioWs) => {
 
     const transcript = history.map(m => `${m.role === 'assistant' ? 'Aria' : 'Caller'}: ${m.content}`).join('\n')
 
-    const extractResult = await getGroq().chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const extractResult = await getOAI().chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 200,
       temperature: 0,
       messages: [
@@ -277,9 +275,9 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get AI response from Groq
-      const completion = await getGroq().chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+      // 1. Get AI response from OpenAI
+      const completion = await getOAI().chat.completions.create({
+        model: 'gpt-4o-mini',
         max_tokens: 120,
         temperature: 0.6,
         messages: [
