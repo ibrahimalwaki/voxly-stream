@@ -12,6 +12,7 @@ function pcm24kTo8kMulaw(pcmBuffer) {
   const outSamples = Math.floor(samples / 3)
   const out = Buffer.alloc(outSamples)
   for (let i = 0; i < outSamples; i++) {
+    // Simple decimation: take every 3rd sample
     let sample = pcmBuffer.readInt16LE(i * 6)
     const sign = (sample >> 8) & 0x80
     if (sign) sample = -sample
@@ -33,17 +34,17 @@ function getOAI() { return _openai || (_openai = new OpenAI({ apiKey: process.en
 const PORT = process.env.PORT || 8080
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Aria, the AI receptionist for Bright Smile Dental. You sound like a real person picking up the phone — warm, relaxed, helpful.
+const SYSTEM_PROMPT = `You are Aria, the AI receptionist for Bright Smile Dental. You handle patient calls exactly like a warm, experienced human receptionist.
 
-## VOICE RULES — every single turn
-1. ONE question per turn. Never double up.
-2. Keep it to 1–2 sentences. This is a phone call.
-3. No stalling phrases: "let me check," "one moment," "I'm looking that up."
-4. No robotic openers: "Certainly!", "Absolutely!", "Great!", "Of course!", "Sure thing!"
-5. Check conversation history before speaking — never re-ask something already answered.
-6. Use the caller's name sparingly — once or twice max, not every turn.
-7. Confirm what you heard, then ask only the next thing you need.
-8. Don't say you're AI unless asked directly. If asked: "I'm an AI receptionist — I can help with most things, and if you'd prefer a person I can connect you right away."
+## VOICE RULES — follow on every single turn
+1. ONE question per response. Never ask two things at once.
+2. 1–2 sentences max. This is a phone call not an email.
+3. Never say "let me check", "one moment", "I'm looking that up", or any filler.
+4. Never open with "Certainly!", "Absolutely!", "Great!" — respond naturally.
+5. Always check conversation history before asking — never re-ask something already answered.
+6. Use the caller's name at most once after learning it.
+7. Confirm what you just heard, then ask only the next missing piece.
+8. Never say you are an AI unless directly asked. If asked say: "I'm an AI receptionist — I can help with most things, and if you'd prefer a person I can connect you right away."
 
 ## Clinic Info
 - Name: Bright Smile Dental | Phone: (555) 123-4567
@@ -51,77 +52,67 @@ const SYSTEM_PROMPT = `You are Aria, the AI receptionist for Bright Smile Dental
 - Hours: Mon–Wed 8am–6pm, Thu 8am–7pm, Fri 8am–5pm, Sat 9am–2pm, Sun closed
 - Services: Cleanings, Fillings, Extractions, Root Canal, Crowns, Implants, Whitening, Veneers, Invisalign, Emergency Care, Pediatric Dentistry, Sedation
 
-## CALL FLOW
+## BOOKING FLOW — strictly in this order, one step at a time
+You are collecting information to book an appointment. Do NOT skip steps. Do NOT move to the next step until you have confirmed the current one.
 
-### OPENING
-Answer with: "Hi, thanks for calling Bright Smile Dental — how can I help you?"
-That's it. Don't ask for a name yet. Don't ask for anything else. Just listen.
-
-### HANDLING GENERAL QUESTIONS
-If they ask about hours, location, services, insurance, or anything informational — just answer it. Be helpful. Be brief. Then: "Is there anything else I can help with?" or "Would you like to go ahead and book something?"
-
-### BOOKING FLOW — only when they want an appointment
-When the caller says they want to schedule, book, come in, make an appointment, etc. — start this flow. Go one step at a time. Do NOT skip ahead.
-
-STEP 1 — What they need
-  Ask: "What are you looking to come in for — a cleaning, checkup, or something else?"
-  When answered: confirm it. "Got it, a [service]." → next step.
-
-STEP 2 — Full name
+STEP 1 — Full name
   Ask: "Can I get your full name?"
-  When answered: confirm. "Got it, [name]." → next step.
+  When given: confirm it. "Got it, [name]." → go to step 2.
 
-STEP 3 — Preferred day and time
-  Ask: "Do you have a day or time that works best for you?"
-  When answered: confirm. "[Day] at [time] works." → next step.
-  If they're vague ("sometime next week"): offer something specific. "How about Tuesday at 10am?"
+STEP 2 — Callback number
+  Ask: "And the best number to reach you?"
+  When given: repeat it back. "So that's [number] — is that right?"
+  Wait for confirmation before moving on.
 
-STEP 4 — Phone number
-  Ask: "What's the best number to reach you?"
-  When answered: read it back. "So that's [number], right?"
-  Wait for them to confirm before moving on.
+STEP 3 — Email address
+  Ask: "What's the best email for your confirmation?"
+  When given: spell it back letter by letter. Example — they say "jackson at gmail dot com" → you say "Let me just confirm: j-a-c-k-s-o-n at gmail dot com — is that right?"
+  Wait for them to say yes before moving on.
 
-STEP 5 — Email
-  Ask: "And what email should we send the confirmation to?"
-  When answered: spell it back. Example — they say "jackson at gmail dot com" → you say "That's j-a-c-k-s-o-n at gmail dot com?"
-  Wait for confirmation.
+STEP 4 — Service needed
+  Ask: "What brings you in — is this for a cleaning, checkup, or something else?"
+  When given: confirm it. "Got it, a [service]." → go to step 5.
 
-STEP 6 — New patient check
-  Ask: "Have you been in to see us before?"
-  If first time: "Welcome! Do you have dental insurance you'd like to use?"
-  If returning: skip to next step.
+STEP 5 — Preferred day and time
+  Ask: "Do you have a preferred day or time in mind?"
+  When given: confirm it. "Perfect, [day] at [time]." → go to step 6.
 
-STEP 7 — Confirm everything
-  Read it all back naturally: "Alright, so [name], we've got you down for a [service] on [day] at [time]. We'll reach you at [number] and send a confirmation to [email]. Sound good?"
-  If something's wrong: "No worries — what needs to change?" Fix it and re-confirm.
-  WAIT for them to say yes before wrapping up.
-  Only after they confirm: "You're all set — we'll see you then!"
+STEP 6 — New patient insurance check
+  Ask: "Is this your first visit with us?"
+  If yes: "Do you have dental insurance you'd like to use?"
+  If no: skip this step.
+
+STEP 7 — Final read-back and confirmation
+  Read everything back in one sentence: "Just to confirm — [name], a [service] on [day] at [time]. We'll call you at [number] and send confirmation to [email]. Does that all sound right?"
+  If they say something is wrong: "My apologies — what did I get wrong?" then correct and re-confirm.
+  WAIT for the caller to say yes/correct/sounds good before saying "You're all set!"
+  Only say "You're all set!" after explicit confirmation.
 
 STEP 8 — Demo pitch (always do this after "You're all set!")
-  Say: "Hey, before you go — I should tell you something. I'm actually Aria, an AI receptionist built by Voxly. Everything you just went through is what your clinic's patients would hear around the clock, 24/7. Most dental offices miss 5 to 10 calls a day. I pick up every single one. Would you be open to a quick 15-minute call with our founder Ibrahim to learn more?"
+  Say: "Before I let you go — I want to share something with you. I'm Aria, an AI receptionist built by Voxly. What you just experienced is exactly what your clinic's patients would hear 24 hours a day, 7 days a week. Most dental clinics miss 5 to 10 calls a day — I answer every single one. Would you be open to a quick 15-minute call with our founder Ibrahim?"
 
   If yes:
-    Ask: "What's the best number for him to reach you?"
-    Wait for number → repeat back: "That's [number], right?"
-    Wait for confirmation → "And what email should he send the calendar invite to?"
-    Wait for email → spell it back: "So that's [spell each letter] — right?"
-    Wait for confirmation → "Ibrahim will reach out soon. Have a great day!"
+    Ask: "What's the best number to reach you?"
+    Wait for number → repeat it back: "So that's [number] — is that right?"
+    Wait for confirmation → then ask: "And the best email for the calendar invite?"
+    Wait for email → spell it back letter by letter: "Let me confirm — [spell each letter] — is that right?"
+    Wait for confirmation → say: "Perfect — Ibrahim will be in touch shortly. Have a great day!"
 
   If no / not interested:
-    Say: "Totally fair. I'll be straight with you though — clinics that tried this are seeing patients book at 2am, zero missed calls, and their front desk way less stressed. It's worth even 10 minutes, no strings attached. Would you be up for that?"
-    If still no: "No problem at all — if you change your mind, just call back anytime. Have a great day!"
+    Say: "Totally understand — I'll be honest with you though, clinics that looked into this are seeing real results. Patients getting booked at 2am, zero missed calls, front desk less stressed. It's genuinely worth even 10 minutes of your time. No commitment at all — just a quick look. Would that be okay?"
+    If still no: "No problem at all — if you ever change your mind just call back anytime. Have a wonderful day!"
 
   If they say they already have a receptionist:
-    Say: "That's awesome — this actually works alongside your team, not instead of them. It handles the overflow and after-hours calls they can't get to. Your receptionist gets to focus on the patients in front of them. Worth a quick 10-minute chat with Ibrahim?"
+    Say: "That's great — this actually works alongside your team, not instead of them. It handles the overflow and after-hours calls they simply can't get to. Your receptionist gets to focus on the patients right in front of them. Worth even a quick 10 minutes with Ibrahim?"
 
   If they ask how it works:
-    Say: "It plugs right into your phone line and booking system — Ibrahim handles the whole setup. Want me to grab your number and email so he can reach out?"
+    Say: "It plugs directly into your phone line and booking system — Ibrahim handles the entire setup for you. Want me to grab your number and email so he can reach out?"
 
-## TRANSFER TO HUMAN
-Only if caller explicitly says "talk to a person," "transfer me," "speak to someone," "real person," or "human."
-Say: "No problem — press 9 on your keypad and I'll connect you right now." then output: [TRANSFER_TO_HUMAN]`
+## Transfer to Human
+Only if caller explicitly says "talk to a person", "transfer me", "speak to someone", "real person", "human".
+Say: "Of course — press 9 on your keypad to be connected right now." then output: [TRANSFER_TO_HUMAN]`
 
-// ── HTTP SERVER ───────────────────────────────────────────────────────────────
+// ── HTTP SERVER (for Twilio webhook + health check) ───────────────────────────
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200)
@@ -130,6 +121,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/voice') {
+    // Twilio calls this when a call comes in — respond with TwiML to start stream
     const host = req.headers.host
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -162,38 +154,13 @@ wss.on('connection', (twilioWs) => {
   let speechBuffer = ''
   let silenceTimer = null
 
-  // ── TTS → TWILIO ───────────────────────────────────────────────────────────
-  async function ttsAndSend(text) {
-    if (!text.trim() || !streamSid || twilioWs.readyState !== twilioWs.OPEN) return
-
-    const response = await getOAI().audio.speech.create({
-      model: 'tts-1',
-      voice: 'nova',
-      input: text,
-      response_format: 'pcm',
-      speed: 1.0,
-    })
-
-    const pcmBuffer = Buffer.from(await response.arrayBuffer())
-    const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
-    const chunkSize = 160
-    for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-      twilioWs.send(JSON.stringify({
-        event: 'media',
-        streamSid,
-        media: { payload: audioBuffer.subarray(i, i + chunkSize).toString('base64') },
-      }))
-    }
-  }
-
   // ── DEEPGRAM LIVE STT ──────────────────────────────────────────────────────
   async function startDeepgram() {
     const connection = getDG().listen.live({
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
-      interim_results: true,   // needed for endpointing + speech_final
-      endpointing: 700,        // Deepgram waits 700ms of actual silence (VAD-based, smarter than a timer)
+      interim_results: false,
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -202,31 +169,37 @@ wss.on('connection', (twilioWs) => {
     connection.on('open', () => {
       console.log('Deepgram connected')
       dgReady = true
+
       if (pendingAudioFrames.length > 0) {
-        for (const frame of pendingAudioFrames) connection.send(frame)
-        console.log(`Flushed ${pendingAudioFrames.length} queued frames`)
+        for (const frame of pendingAudioFrames) {
+          connection.send(frame)
+        }
+        console.log(`Flushed ${pendingAudioFrames.length} queued audio frames to Deepgram`)
         pendingAudioFrames = []
       }
     })
 
     connection.on('Results', (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript
-      if (!data.is_final || !transcript) return
+      if (!transcript || !data.is_final) return
 
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
 
-      // speech_final = Deepgram is confident the utterance ended (after 700ms silence)
-      if (data.speech_final && !isProcessing) {
-        const text = speechBuffer
-        speechBuffer = ''
-        handleUserSpeech(text)
-      }
+      clearTimeout(silenceTimer)
+      silenceTimer = setTimeout(() => {
+        if (speechBuffer && !isProcessing) {
+          const text = speechBuffer
+          speechBuffer = ''
+          handleUserSpeech(text)
+        }
+      }, 700)
     })
 
     connection.on('UtteranceEnd', () => {
-      // Fallback: fires if speech_final was missed
+      // Fallback in case Deepgram emits utterance end after the final result timer
       if (speechBuffer && !isProcessing) {
+        clearTimeout(silenceTimer)
         const text = speechBuffer
         speechBuffer = ''
         handleUserSpeech(text)
@@ -234,7 +207,12 @@ wss.on('connection', (twilioWs) => {
     })
 
     connection.on('error', (err) => {
-      console.error('Deepgram error:', { message: err?.message, code: err?.code })
+      console.error('Deepgram error:', {
+        message: err?.message,
+        type: err?.type,
+        code: err?.code,
+        reason: err?.reason,
+      })
     })
     connection.on('close', () => {
       dgReady = false
@@ -245,7 +223,7 @@ wss.on('connection', (twilioWs) => {
     return connection
   }
 
-  // ── SAVE BOOKING TO DENTAL SAAS ────────────────────────────────────────────
+  // ── EXTRACT BOOKING DATA AND POST TO DENTAL SAAS ──────────────────────────
   async function saveBooking(history) {
     const appUrl = process.env.VOXLY_APP_URL
     if (!appUrl) return
@@ -267,7 +245,7 @@ wss.on('connection', (twilioWs) => {
       const raw = extractResult.choices[0]?.message?.content?.replace(/```json|```/g, '').trim()
       booking = JSON.parse(raw)
     } catch {
-      console.error('Failed to parse booking JSON')
+      console.error('Failed to parse booking JSON from Gemini')
       return
     }
 
@@ -277,11 +255,14 @@ wss.on('connection', (twilioWs) => {
       body: JSON.stringify(booking),
     })
 
-    if (res.ok) console.log('Booking saved:', booking.patient_name)
-    else console.error('Booking API error:', res.status, await res.text())
+    if (res.ok) {
+      console.log('Booking saved to Supabase:', booking.patient_name)
+    } else {
+      console.error('Booking API error:', res.status, await res.text())
+    }
   }
 
-  // ── HANDLE USER SPEECH: Groq → stream TTS → Twilio ───────────────────────
+  // ── HANDLE USER SPEECH → GEMINI → TTS → TWILIO ──────────────────────────────
   async function handleUserSpeech(text) {
     if (!text.trim() || isProcessing) return
     isProcessing = true
@@ -290,11 +271,11 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get full Groq response (sentence streaming caused issues with dots in emails etc.)
+      // 1. Get AI response from Groq
       const completion = await getGroq().chat.completions.create({
         model: 'llama-3.3-70b-versatile',
-        max_tokens: 200,
-        temperature: 0.4,
+        max_tokens: 120,
+        temperature: 0.6,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           ...conversationHistory,
@@ -308,46 +289,96 @@ wss.on('connection', (twilioWs) => {
       console.log('Aria:', aiText)
       conversationHistory.push({ role: 'assistant', content: aiText })
 
+      // If booking just confirmed, extract and save it
       if (aiText.toLowerCase().includes("you're all set")) {
         saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
       }
 
-      // 2. Stream TTS to Twilio as audio arrives
-      await ttsAndSend(aiText)
+      // 2. Generate TTS audio from OpenAI
+      const ttsResponse = await getOAI().audio.speech.create({
+        model: 'tts-1',
+        voice: 'nova',
+        input: aiText,
+        response_format: 'pcm',
+        speed: 1.0,
+      })
 
+      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
+
+      // 3. Send audio back to Twilio in chunks
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'end_of_response' } }))
+        const chunkSize = 160 // 20ms of audio at 8kHz mulaw
+        for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+          const chunk = audioBuffer.subarray(i, i + chunkSize)
+          twilioWs.send(JSON.stringify({
+            event: 'media',
+            streamSid,
+            media: {
+              payload: chunk.toString('base64'),
+            },
+          }))
+        }
+
+        // Mark end of audio
+        twilioWs.send(JSON.stringify({
+          event: 'mark',
+          streamSid,
+          mark: { name: 'end_of_response' },
+        }))
       }
 
+      // Handle transfer
       if (transferRequested) {
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
-            twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
+            twilioWs.send(JSON.stringify({
+              event: 'stop',
+              streamSid,
+            }))
           }
-        }, 1000)
+        }, audioBuffer.length * 1000 / 8000 + 500)
       }
 
     } catch (err) {
       console.error('Pipeline error:', err)
     } finally {
       isProcessing = false
-      // Process any speech that came in while Aria was talking
-      if (speechBuffer.trim()) {
-        const pending = speechBuffer
-        speechBuffer = ''
-        setTimeout(() => handleUserSpeech(pending), 50)
-      }
     }
   }
 
   // ── GREETING ───────────────────────────────────────────────────────────────
   async function sendGreeting() {
-    const greeting = "Hi, thanks for calling Bright Smile Dental — this is Aria, how can I help you?"
+    const greeting = "Hello, thank you for calling Bright Smile Dental — this is Aria, how can I help you today?"
     conversationHistory.push({ role: 'assistant', content: greeting })
+
     try {
-      await ttsAndSend(greeting)
+      const ttsResponse = await getOAI().audio.speech.create({
+        model: 'tts-1',
+        voice: 'nova',
+        input: greeting,
+        response_format: 'pcm',
+        speed: 1.0,
+      })
+
+      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
+      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
+
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'greeting_end' } }))
+        const chunkSize = 160
+        for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+          const chunk = audioBuffer.subarray(i, i + chunkSize)
+          twilioWs.send(JSON.stringify({
+            event: 'media',
+            streamSid,
+            media: { payload: chunk.toString('base64') },
+          }))
+        }
+        twilioWs.send(JSON.stringify({
+          event: 'mark',
+          streamSid,
+          mark: { name: 'greeting_end' },
+        }))
       }
     } catch (err) {
       console.error('Greeting error:', err)
@@ -365,14 +396,18 @@ wss.on('connection', (twilioWs) => {
         callSid = msg.start.callSid
         console.log('Stream started:', streamSid)
         dgLive = await startDeepgram()
+        // Small delay to ensure Twilio stream is ready to receive audio
         setTimeout(() => sendGreeting(), 500)
         break
 
       case 'media':
         if (dgLive) {
           const audioData = Buffer.from(msg.media.payload, 'base64')
-          if (dgReady) dgLive.send(audioData)
-          else pendingAudioFrames.push(audioData)
+          if (dgReady) {
+            dgLive.send(audioData)
+          } else {
+            pendingAudioFrames.push(audioData)
+          }
         }
         break
 
