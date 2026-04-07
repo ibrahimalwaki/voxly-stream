@@ -293,7 +293,7 @@ wss.on('connection', (twilioWs) => {
     else console.error('Booking API error:', res.status, await res.text())
   }
 
-  // ── HANDLE USER SPEECH: stream Groq → sentence TTS → Twilio ───────────────
+  // ── HANDLE USER SPEECH: Groq → stream TTS → Twilio ───────────────────────
   async function handleUserSpeech(text) {
     if (!text.trim() || isProcessing) return
     isProcessing = true
@@ -302,66 +302,33 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // Stream Groq tokens
-      const groqStream = await getGroq().chat.completions.create({
+      // 1. Get full Groq response (sentence streaming caused issues with dots in emails etc.)
+      const completion = await getGroq().chat.completions.create({
         model: 'llama-3.3-70b-versatile',
         max_tokens: 150,
         temperature: 0.6,
-        stream: true,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           ...conversationHistory,
         ],
       })
 
-      let tokenBuffer = ''
-      let fullAiText = ''
-      // TTS sentences run sequentially via promise chain
-      let ttsChain = Promise.resolve()
+      let aiText = completion.choices[0]?.message?.content || "I'm sorry, could you repeat that?"
+      const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
+      aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
 
-      function flushSentence(sentence) {
-        sentence = sentence.replace('[TRANSFER_TO_HUMAN]', '').trim()
-        if (!sentence) return
-        ttsChain = ttsChain.then(() => streamTtsToTwilio(sentence))
+      console.log('Aria:', aiText)
+      conversationHistory.push({ role: 'assistant', content: aiText })
+
+      if (aiText.toLowerCase().includes("you're all set")) {
+        saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
       }
 
-      for await (const chunk of groqStream) {
-        const token = chunk.choices[0]?.delta?.content || ''
-        if (!token) continue
-        tokenBuffer += token
-        fullAiText += token
+      // 2. Stream TTS to Twilio as audio arrives
+      await streamTtsToTwilio(aiText)
 
-        // Flush complete sentences as they arrive
-        const sentenceRegex = /[^.!?]+[.!?]+\s*/g
-        let match
-        let lastIndex = 0
-        while ((match = sentenceRegex.exec(tokenBuffer)) !== null) {
-          flushSentence(match[0])
-          lastIndex = sentenceRegex.lastIndex
-        }
-        tokenBuffer = tokenBuffer.slice(lastIndex)
-      }
-
-      // Flush any remaining text (no sentence-ending punctuation)
-      if (tokenBuffer.trim()) flushSentence(tokenBuffer)
-
-      // Wait for all TTS to finish
-      await ttsChain
-
-      // Send end mark
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'end_of_response' } }))
-      }
-
-      fullAiText = fullAiText.trim()
-      const transferRequested = fullAiText.includes('[TRANSFER_TO_HUMAN]')
-      fullAiText = fullAiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
-
-      console.log('Aria:', fullAiText)
-      conversationHistory.push({ role: 'assistant', content: fullAiText })
-
-      if (fullAiText.toLowerCase().includes("you're all set")) {
-        saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
       }
 
       if (transferRequested) {
@@ -376,6 +343,12 @@ wss.on('connection', (twilioWs) => {
       console.error('Pipeline error:', err)
     } finally {
       isProcessing = false
+      // Process any speech that came in while Aria was talking
+      if (speechBuffer.trim()) {
+        const pending = speechBuffer
+        speechBuffer = ''
+        setTimeout(() => handleUserSpeech(pending), 50)
+      }
     }
   }
 
