@@ -213,7 +213,8 @@ wss.on('connection', (twilioWs) => {
       model: 'nova-3',
       language: 'en-US',
       smart_format: true,
-      interim_results: false,
+      interim_results: true,   // needed for endpointing + speech_final
+      endpointing: 700,        // Deepgram waits 700ms of actual silence (VAD-based, smarter than a timer)
       vad_events: true,
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -231,24 +232,22 @@ wss.on('connection', (twilioWs) => {
 
     connection.on('Results', (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript
-      if (!transcript || !data.is_final) return
+      if (!data.is_final || !transcript) return
 
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
 
-      clearTimeout(silenceTimer)
-      silenceTimer = setTimeout(() => {
-        if (speechBuffer && !isProcessing) {
-          const text = speechBuffer
-          speechBuffer = ''
-          handleUserSpeech(text)
-        }
-      }, 500)
+      // speech_final = Deepgram is confident the utterance ended (after 700ms silence)
+      if (data.speech_final && !isProcessing) {
+        const text = speechBuffer
+        speechBuffer = ''
+        handleUserSpeech(text)
+      }
     })
 
     connection.on('UtteranceEnd', () => {
+      // Fallback: fires if speech_final was missed
       if (speechBuffer && !isProcessing) {
-        clearTimeout(silenceTimer)
         const text = speechBuffer
         speechBuffer = ''
         handleUserSpeech(text)
@@ -315,8 +314,8 @@ wss.on('connection', (twilioWs) => {
       // 1. Get full Groq response (sentence streaming caused issues with dots in emails etc.)
       const completion = await getGroq().chat.completions.create({
         model: 'llama-3.3-70b-versatile',
-        max_tokens: 150,
-        temperature: 0.6,
+        max_tokens: 200,
+        temperature: 0.4,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           ...conversationHistory,
