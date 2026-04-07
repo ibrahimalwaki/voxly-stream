@@ -162,42 +162,21 @@ wss.on('connection', (twilioWs) => {
   let speechBuffer = ''
   let silenceTimer = null
 
-  // ── STREAM TTS → TWILIO (sends audio as it arrives, no waiting) ────────────
-  async function streamTtsToTwilio(text) {
+  // ── TTS → TWILIO ───────────────────────────────────────────────────────────
+  async function ttsAndSend(text) {
     if (!text.trim() || !streamSid || twilioWs.readyState !== twilioWs.OPEN) return
 
     const response = await getOAI().audio.speech.create({
-      model: 'gpt-4o-mini-tts',
-      voice: 'marin',
+      model: 'tts-1',
+      voice: 'nova',
       input: text,
       response_format: 'pcm',
       speed: 1.0,
     })
 
-    let leftover = Buffer.alloc(0)
-    for await (const rawChunk of response.body) {
-      const buf = Buffer.concat([leftover, Buffer.from(rawChunk)])
-      // Need multiples of 6 bytes (3 input samples × 2 bytes per sample → 1 output sample)
-      const processable = Math.floor(buf.length / 6) * 6
-      if (processable > 0) {
-        const mulaw = pcm24kTo8kMulaw(buf.subarray(0, processable))
-        sendMulawToTwilio(mulaw)
-        leftover = buf.subarray(processable)
-      } else {
-        leftover = buf
-      }
-    }
-    // Flush remaining bytes (pad to multiple of 6)
-    if (leftover.length > 0) {
-      const padded = Buffer.alloc(Math.ceil(leftover.length / 6) * 6)
-      leftover.copy(padded)
-      sendMulawToTwilio(pcm24kTo8kMulaw(padded))
-    }
-  }
-
-  function sendMulawToTwilio(audioBuffer) {
-    if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return
-    const chunkSize = 160 // 20ms at 8kHz
+    const pcmBuffer = Buffer.from(await response.arrayBuffer())
+    const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
+    const chunkSize = 160
     for (let i = 0; i < audioBuffer.length; i += chunkSize) {
       twilioWs.send(JSON.stringify({
         event: 'media',
@@ -334,7 +313,7 @@ wss.on('connection', (twilioWs) => {
       }
 
       // 2. Stream TTS to Twilio as audio arrives
-      await streamTtsToTwilio(aiText)
+      await ttsAndSend(aiText)
 
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'end_of_response' } }))
@@ -366,7 +345,7 @@ wss.on('connection', (twilioWs) => {
     const greeting = "Hi, thanks for calling Bright Smile Dental — this is Aria, how can I help you?"
     conversationHistory.push({ role: 'assistant', content: greeting })
     try {
-      await streamTtsToTwilio(greeting)
+      await ttsAndSend(greeting)
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'greeting_end' } }))
       }
