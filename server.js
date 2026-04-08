@@ -158,6 +158,7 @@ wss.on('connection', (twilioWs) => {
   let isProcessing = false
   let speechBuffer = ''
   let silenceTimer = null
+  let clientConfig = null // loaded per-call based on Twilio number
 
   // ── DEEPGRAM LIVE STT ──────────────────────────────────────────────────────
   async function startDeepgram() {
@@ -277,12 +278,13 @@ wss.on('connection', (twilioWs) => {
 
     try {
       // 1. Get AI response from OpenAI
+      const activePrompt = clientConfig?.system_prompt || SYSTEM_PROMPT
       const completion = await getOAI().chat.completions.create({
         model: 'gpt-4o-mini',
         max_tokens: 120,
         temperature: 0.6,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: activePrompt },
           ...conversationHistory,
         ],
       })
@@ -302,7 +304,7 @@ wss.on('connection', (twilioWs) => {
       // 2. Generate TTS audio from OpenAI
       const ttsResponse = await getOAI().audio.speech.create({
         model: 'tts-1',
-        voice: 'nova',
+        voice: clientConfig?.voice || 'nova',
         input: aiText,
         response_format: 'pcm',
         speed: 1.0,
@@ -354,13 +356,15 @@ wss.on('connection', (twilioWs) => {
 
   // ── GREETING ───────────────────────────────────────────────────────────────
   async function sendGreeting() {
-    const greeting = "Hello, thank you for calling Bright Smile Dental — this is Aria, how can I help you today?"
+    const clinicName = clientConfig?.name || 'Bright Smile Dental'
+    const aiName = clientConfig?.ai_name || 'Aria'
+    const greeting = `Hello, thank you for calling ${clinicName} — this is ${aiName}, how can I help you today?`
     conversationHistory.push({ role: 'assistant', content: greeting })
 
     try {
       const ttsResponse = await getOAI().audio.speech.create({
         model: 'tts-1',
-        voice: 'nova',
+        voice: clientConfig?.voice || 'nova',
         input: greeting,
         response_format: 'pcm',
         speed: 1.0,
@@ -400,8 +404,22 @@ wss.on('connection', (twilioWs) => {
         streamSid = msg.start.streamSid
         callSid = msg.start.callSid
         console.log('Stream started:', streamSid)
+
+        // Load client config based on which Twilio number was called
+        try {
+          const toNumber = msg.start.customParameters?.to || msg.start.to
+          if (toNumber && process.env.VOXLY_APP_URL) {
+            const res = await fetch(`${process.env.VOXLY_APP_URL}/api/clients?phone=${encodeURIComponent(toNumber)}`)
+            if (res.ok) {
+              clientConfig = await res.json()
+              console.log('Loaded client config:', clientConfig.name)
+            }
+          }
+        } catch (err) {
+          console.error('Failed to load client config:', err)
+        }
+
         dgLive = await startDeepgram()
-        // Small delay to ensure Twilio stream is ready to receive audio
         setTimeout(() => sendGreeting(), 500)
         break
 
