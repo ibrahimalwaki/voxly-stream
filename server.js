@@ -73,24 +73,20 @@ STEP 2 — Phone number
 "And what's the best number to reach you?"
 → "Just to confirm, that's [number] — did I get that right?"
 
-STEP 3 — Email
-"What's the best email to send your confirmation?"
-→ "Let me confirm: [spell it out] — is that correct?"
-
-STEP 4 — Service
+STEP 3 — Service
 "What can we help you with today — a cleaning, checkup, or something else?"
 → "Got it, a [service]."
 
-STEP 5 — Time
+STEP 4 — Time
 "Do you have a day or time that works best for you?"
 → "Perfect, [day] at [time]."
 
-STEP 6 — New patient
+STEP 5 — New patient
 "Will this be your first visit with us?"
 → If yes: "Do you have dental insurance you'd like to use?"
 
-STEP 7 — Confirmation
-"Just to make sure everything looks good — [name], you're booked for a [service] on [day] at [time]. We'll call you at [number] and send details to [email]. Does that all look right?"
+STEP 6 — Confirmation
+"Just to make sure everything looks good — [name], you're booked for a [service] on [day] at [time]. We'll call you at [number]. Does that all look right?"
 → If yes: "You're all set! We look forward to seeing you."
 
 ## DEMO PITCH (after booking — keep it light and natural)
@@ -99,8 +95,6 @@ STEP 7 — Confirmation
 ### If YES:
 "Great — what's the best number to reach you?"
 → confirm number
-"And the best email for the invite?"
-→ confirm email
 "Perfect — Ibrahim will reach out shortly. Have a great day!"
 
 ### If NO / hesitant:
@@ -156,6 +150,7 @@ wss.on('connection', (twilioWs) => {
   let dgReady = false
   let pendingAudioFrames = []
   let isProcessing = false
+  let isPlaying = false
   let speechBuffer = ''
   let silenceTimer = null
   let clientConfig = null // loaded per-call based on Twilio number
@@ -192,6 +187,17 @@ wss.on('connection', (twilioWs) => {
       speechBuffer += ' ' + transcript
       speechBuffer = speechBuffer.trim()
 
+      // Barge-in: if caller speaks while Aria is talking, stop Aria immediately
+      if (isPlaying && streamSid && twilioWs.readyState === twilioWs.OPEN) {
+        twilioWs.send(JSON.stringify({ event: 'clear', streamSid }))
+        isPlaying = false
+        isProcessing = false
+      }
+
+      // Use longer delay when caller is spelling (single letter fragments)
+      const isSpelling = transcript.trim().length <= 1
+      const delay = isSpelling ? 1500 : 700
+
       clearTimeout(silenceTimer)
       silenceTimer = setTimeout(() => {
         if (speechBuffer && !isProcessing) {
@@ -199,12 +205,12 @@ wss.on('connection', (twilioWs) => {
           speechBuffer = ''
           handleUserSpeech(text)
         }
-      }, 700)
+      }, delay)
     })
 
     connection.on('UtteranceEnd', () => {
-      // Fallback in case Deepgram emits utterance end after the final result timer
-      if (speechBuffer && !isProcessing) {
+      // Fallback: only fire if buffer looks complete (not mid-spelling)
+      if (speechBuffer && !isProcessing && speechBuffer.length >= 5) {
         clearTimeout(silenceTimer)
         const text = speechBuffer
         speechBuffer = ''
@@ -241,7 +247,7 @@ wss.on('connection', (twilioWs) => {
       max_tokens: 200,
       temperature: 0,
       messages: [
-        { role: 'system', content: 'Extract booking details from a call transcript. Return ONLY valid JSON with keys: patient_name, patient_phone, patient_email, service, preferred_time, notes. Use null for missing values.' },
+        { role: 'system', content: 'Extract booking details from a call transcript. Return ONLY valid JSON with keys: patient_name, patient_phone, service, preferred_time, notes. Use null for missing values.' },
         { role: 'user', content: transcript },
       ],
     })
@@ -268,7 +274,94 @@ wss.on('connection', (twilioWs) => {
     }
   }
 
-  // ── HANDLE USER SPEECH → GEMINI → TTS → TWILIO ──────────────────────────────
+  // ── FETCH TTS AUDIO → mulaw buffer ────────────────────────────────────────
+  async function fetchTTSAudio(text) {
+    const response = await getOAI().audio.speech.create({
+      model: 'tts-1',
+      voice: clientConfig?.voice || 'nova',
+      input: text,
+      response_format: 'pcm',
+      speed: 1.0,
+    })
+    const pcmBuffer = Buffer.from(await response.arrayBuffer())
+    return pcm24kTo8kMulaw(pcmBuffer)
+  }
+
+  // ── PLAY AUDIO BUFFERS IN ORDER ────────────────────────────────────────────
+  // Accepts an array of Promise<Buffer> — fires all in parallel, plays in order.
+  async function playAudioQueue(audioPromises) {
+    if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return
+    isPlaying = true
+    const chunkSize = 160
+    for (const audioPromise of audioPromises) {
+      if (!isPlaying) break
+      const audioBuffer = await audioPromise
+      if (!audioBuffer) continue
+      for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+        if (!isPlaying) break
+        twilioWs.send(JSON.stringify({
+          event: 'media',
+          streamSid,
+          media: { payload: audioBuffer.subarray(i, i + chunkSize).toString('base64') },
+        }))
+      }
+    }
+    if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
+      twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name: 'end_of_response' } }))
+    }
+  }
+
+  // ── STREAM GPT → SENTENCE-LEVEL TTS PIPELINE ──────────────────────────────
+  // Streams GPT tokens, fires TTS the moment each sentence is complete,
+  // plays all sentences in order. First audio arrives in ~sentence_1_time
+  // instead of full_response_time + full_tts_time.
+  async function streamGPTAndSpeak(messages) {
+    const stream = await getOAI().chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 120,
+      temperature: 0.6,
+      messages,
+      stream: true,
+    })
+
+    let tokenBuffer = ''
+    let fullText = ''
+    const audioQueue = [] // Promise<Buffer>[] — TTS fires immediately, played in order
+
+    function flushSentence(sentence) {
+      sentence = sentence.trim()
+      if (sentence.length < 2) return
+      // Fire TTS immediately (non-blocking) — result queued for ordered playback
+      audioQueue.push(fetchTTSAudio(sentence))
+    }
+
+    for await (const chunk of stream) {
+      const token = chunk.choices[0]?.delta?.content || ''
+      if (!token) continue
+      tokenBuffer += token
+      fullText += token
+
+      // Split on sentence-ending punctuation followed by whitespace
+      // Also split on em-dash pause if buffer is getting long (natural breath point)
+      const boundary = tokenBuffer.match(/^(.+?[.!?])\s+/) ||
+        (tokenBuffer.length > 80 ? tokenBuffer.match(/^(.+?[,—])\s+/) : null)
+
+      if (boundary) {
+        flushSentence(boundary[1])
+        tokenBuffer = tokenBuffer.slice(boundary[0].length)
+      }
+    }
+
+    // Flush anything left in the buffer
+    if (tokenBuffer.trim()) flushSentence(tokenBuffer)
+
+    // Play all queued audio in order (TTS for later sentences is already running)
+    await playAudioQueue(audioQueue)
+
+    return fullText
+  }
+
+  // ── HANDLE USER SPEECH ─────────────────────────────────────────────────────
   async function handleUserSpeech(text) {
     if (!text.trim() || isProcessing) return
     isProcessing = true
@@ -277,74 +370,100 @@ wss.on('connection', (twilioWs) => {
     conversationHistory.push({ role: 'user', content: text })
 
     try {
-      // 1. Get AI response from OpenAI
       const activePrompt = clientConfig?.system_prompt || SYSTEM_PROMPT
-      const completion = await getOAI().chat.completions.create({
-        model: 'gpt-4o-mini',
-        max_tokens: 120,
-        temperature: 0.6,
-        messages: [
-          { role: 'system', content: activePrompt },
-          ...conversationHistory,
-        ],
+      const now = new Date().toLocaleString('en-US', {
+        timeZone: 'America/Toronto',
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
       })
+      const baseMessages = [
+        { role: 'system', content: `${activePrompt}\n\nCurrent date and time: ${now} (Eastern Time)` },
+        ...conversationHistory,
+      ]
 
-      let aiText = completion.choices[0]?.message?.content || "I'm sorry, could you repeat that?"
+      // Only run the tool-call loop if the message might contain a time/date.
+      // Everything else goes straight to the streaming pipeline.
+      const mightNeedTools = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|morning|afternoon|evening|next week|\d+\s*(am|pm|:))/i.test(text)
+
+      let aiText = ''
+
+      if (mightNeedTools) {
+        // ── Tool-call path (non-streaming) ──────────────────────────────────
+        const tools = [
+          {
+            type: 'function',
+            function: {
+              name: 'check_slot_availability',
+              description: 'Check if a requested appointment time is available and within clinic hours. Call this BEFORE confirming any appointment time with the caller.',
+              parameters: {
+                type: 'object',
+                properties: {
+                  datetime: { type: 'string', description: 'The requested date and time as a natural language string (e.g. "Thursday at 2pm", "next Monday morning")' },
+                },
+                required: ['datetime'],
+              },
+            },
+          },
+        ]
+
+        let messages = baseMessages
+        for (let i = 0; i < 3; i++) {
+          const completion = await getOAI().chat.completions.create({
+            model: 'gpt-4o-mini', max_tokens: 120, temperature: 0.6, messages, tools, tool_choice: 'auto',
+          })
+          const choice = completion.choices[0]
+          const msg = choice.message
+
+          if (choice.finish_reason === 'tool_calls' && msg.tool_calls?.length > 0) {
+            messages.push(msg)
+            for (const toolCall of msg.tool_calls) {
+              let toolResult
+              try {
+                const args = JSON.parse(toolCall.function.arguments)
+                const appUrl = process.env.VOXLY_APP_URL
+                if (appUrl) {
+                  const res = await fetch(`${appUrl}/api/availability?datetime=${encodeURIComponent(args.datetime)}`)
+                  toolResult = await res.json()
+                } else {
+                  toolResult = { available: true }
+                }
+              } catch {
+                toolResult = { available: true }
+              }
+              console.log('Availability check:', toolResult)
+              messages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(toolResult) })
+            }
+          } else {
+            aiText = msg.content || "I'm sorry, could you repeat that?"
+            break
+          }
+        }
+        if (!aiText) aiText = "I'm sorry, could you repeat that?"
+
+        // Stream TTS for the tool-call result
+        const clean = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
+        await playAudioQueue([fetchTTSAudio(clean)])
+      } else {
+        // ── Streaming pipeline path (most turns) ───────────────────────────
+        aiText = await streamGPTAndSpeak(baseMessages)
+      }
+
       const transferRequested = aiText.includes('[TRANSFER_TO_HUMAN]')
-      aiText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
+      const cleanText = aiText.replace('[TRANSFER_TO_HUMAN]', '').trim()
 
-      console.log('Aria:', aiText)
-      conversationHistory.push({ role: 'assistant', content: aiText })
+      console.log('Aria:', cleanText)
+      conversationHistory.push({ role: 'assistant', content: cleanText })
 
-      // If booking just confirmed, extract and save it
-      if (aiText.toLowerCase().includes("you're all set")) {
+      if (cleanText.toLowerCase().includes("you're all set")) {
         saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
       }
 
-      // 2. Generate TTS audio from OpenAI
-      const ttsResponse = await getOAI().audio.speech.create({
-        model: 'tts-1',
-        voice: clientConfig?.voice || 'nova',
-        input: aiText,
-        response_format: 'pcm',
-        speed: 1.0,
-      })
-
-      const pcmBuffer = Buffer.from(await ttsResponse.arrayBuffer())
-      const audioBuffer = pcm24kTo8kMulaw(pcmBuffer)
-
-      // 3. Send audio back to Twilio in chunks
-      if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        const chunkSize = 160 // 20ms of audio at 8kHz mulaw
-        for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-          const chunk = audioBuffer.subarray(i, i + chunkSize)
-          twilioWs.send(JSON.stringify({
-            event: 'media',
-            streamSid,
-            media: {
-              payload: chunk.toString('base64'),
-            },
-          }))
-        }
-
-        // Mark end of audio
-        twilioWs.send(JSON.stringify({
-          event: 'mark',
-          streamSid,
-          mark: { name: 'end_of_response' },
-        }))
-      }
-
-      // Handle transfer
       if (transferRequested) {
         setTimeout(() => {
           if (twilioWs.readyState === twilioWs.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'stop',
-              streamSid,
-            }))
+            twilioWs.send(JSON.stringify({ event: 'stop', streamSid }))
           }
-        }, audioBuffer.length * 1000 / 8000 + 500)
+        }, 1000)
       }
 
     } catch (err) {
@@ -432,6 +551,10 @@ wss.on('connection', (twilioWs) => {
             pendingAudioFrames.push(audioData)
           }
         }
+        break
+
+      case 'mark':
+        if (msg.mark?.name === 'end_of_response') isPlaying = false
         break
 
       case 'stop':
