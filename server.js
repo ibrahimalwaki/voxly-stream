@@ -137,6 +137,7 @@ wss.on('connection', (twilioWs) => {
   let speechBuffer = ''
   let silenceTimer = null
   let clientConfig = null // loaded per-call based on Twilio number
+  let bookingConfirmed = false
 
   // ── DEEPGRAM LIVE STT ──────────────────────────────────────────────────────
   async function startDeepgram() {
@@ -438,7 +439,7 @@ wss.on('connection', (twilioWs) => {
       conversationHistory.push({ role: 'assistant', content: cleanText })
 
       if (cleanText.toLowerCase().includes("you're all set")) {
-        saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
+        bookingConfirmed = true
       }
 
       if (transferRequested) {
@@ -551,6 +552,9 @@ wss.on('connection', (twilioWs) => {
     console.log('Twilio disconnected')
     if (dgLive) dgLive.finish()
     clearTimeout(silenceTimer)
+    if (bookingConfirmed) {
+      saveBooking(conversationHistory).catch(err => console.error('Booking save failed:', err))
+    }
   })
 
   twilioWs.on('error', (err) => console.error('Twilio WS error:', err))
